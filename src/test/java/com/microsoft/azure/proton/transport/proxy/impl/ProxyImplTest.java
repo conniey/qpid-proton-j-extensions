@@ -331,7 +331,7 @@ public class ProxyImplTest {
 
         when(mockHandler.createProxyRequest(any(), any())).thenReturn("proxy request");
 
-        when(mockResponse.getIsSuccess()).thenReturn(true);
+        when(mockResponse.isSuccess()).thenReturn(true);
         when(mockResponse.getError()).thenReturn(null);
         when(mockHandler.validateProxyResponse(any())).thenReturn(mockResponse);
 
@@ -356,7 +356,7 @@ public class ProxyImplTest {
 
         when(mockHandler.createProxyRequest(any(), any())).thenReturn("proxy request");
 
-        when(mockResponse.getIsSuccess()).thenReturn(false);
+        when(mockResponse.isSuccess()).thenReturn(false);
         when(mockResponse.getError()).thenReturn("proxy failure response");
         when(mockHandler.validateProxyResponse(any())).thenReturn(mockResponse);
 
@@ -685,7 +685,7 @@ public class ProxyImplTest {
         when(handler.createProxyRequest(any(), any())).thenReturn("proxy request");
         when(handler.validateProxyResponse(any())).thenReturn(mockResponse);
 
-        when(mockResponse.getIsSuccess()).thenReturn(false);
+        when(mockResponse.isSuccess()).thenReturn(false);
         when(mockResponse.getError()).thenReturn(getProxyChallenge(true, false));
 
         // Act and Assert
@@ -719,7 +719,7 @@ public class ProxyImplTest {
         when(handler.createProxyRequest(any(), any())).thenReturn("proxy request");
         when(handler.validateProxyResponse(any())).thenReturn(mockResponse);
 
-        when(mockResponse.getIsSuccess()).thenReturn(true);
+        when(mockResponse.isSuccess()).thenReturn(true);
         when(mockResponse.getError()).thenReturn(null);
 
         // Act and Assert
@@ -753,7 +753,7 @@ public class ProxyImplTest {
         when(handler.createProxyRequest(any(), any())).thenReturn("proxy request", "proxy request2");
         when(handler.validateProxyResponse(any())).thenReturn(mockResponse);
 
-        when(mockResponse.getIsSuccess()).thenReturn(false, true);
+        when(mockResponse.isSuccess()).thenReturn(false, true);
         when(mockResponse.getError()).thenReturn(getProxyChallenge(true, true), "Success.");
 
         // Act and Assert
@@ -815,7 +815,7 @@ public class ProxyImplTest {
         when(handler.createProxyRequest(any(), any())).thenReturn("proxy request", "proxy request2");
         when(handler.validateProxyResponse(any())).thenReturn(mockResponse);
 
-        when(mockResponse.getIsSuccess()).thenReturn(false, true);
+        when(mockResponse.isSuccess()).thenReturn(false, true);
         when(mockResponse.getError()).thenReturn(getProxyChallenge(true, true), "Success.");
 
         // Act and Assert

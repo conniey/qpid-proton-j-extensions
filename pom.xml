@@ -9,7 +9,7 @@
 
     <groupId>com.microsoft.azure</groupId>
     <artifactId>qpid-proton-j-extensions</artifactId>
-    <version>1.2.1</version>
+    <version>1.2.2</version>
 
     <licenses>
         <license>
@@ -42,7 +42,7 @@
 
         <!-- Test dependency versions -->
         <junit-version>4.12</junit-version>
-        <mockito-version>2.28.2</mockito-version>
+        <mockito-version>3.0.0</mockito-version>
 
         <!-- Maven tool versions -->
         <maven-checkstyle-plugin.version>3.1.0</maven-checkstyle-plugin.version>
