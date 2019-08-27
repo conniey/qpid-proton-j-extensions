@@ -38,8 +38,8 @@ class TestUtils {
     }
 
     /**
-     * Creates a proxy HTTP response and returns it as a string. If there is content, {@link #CONTENT_LENGTH} and {@link
-     * #CONTENT_TYPE} headers are added to the {@code headers} parameter.
+     * Creates a proxy HTTP response and returns it as a string. If there is content, {@link #CONTENT_LENGTH} and
+     * {@link #CONTENT_TYPE} headers are added to the {@code headers} parameter.
      *
      * @param statusLine HTTP status line to create the proxy response with.
      * @param headers A set of headers to add to the proxy response.

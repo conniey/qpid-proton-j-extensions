@@ -10,6 +10,8 @@ import com.microsoft.azure.proton.transport.proxy.ProxyAuthenticationType;
 import com.microsoft.azure.proton.transport.proxy.ProxyChallengeProcessor;
 import com.microsoft.azure.proton.transport.proxy.ProxyConfiguration;
 import com.microsoft.azure.proton.transport.proxy.ProxyHandler;
+import com.microsoft.azure.proton.transport.proxy.ProxyHandler.ProxyResponseResult;
+import com.microsoft.azure.proton.transport.proxy.ProxyResponse;
 import org.apache.qpid.proton.engine.Transport;
 import org.apache.qpid.proton.engine.TransportException;
 import org.apache.qpid.proton.engine.impl.TransportImpl;
@@ -21,17 +23,20 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Scanner;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static com.microsoft.azure.proton.transport.proxy.ProxyAuthenticationType.BASIC;
 import static com.microsoft.azure.proton.transport.proxy.ProxyAuthenticationType.DIGEST;
-import static com.microsoft.azure.proton.transport.proxy.impl.ProxyHandlerImpl.NEW_LINE;
+import static com.microsoft.azure.proton.transport.proxy.impl.Constants.PROXY_AUTHENTICATE;
 import static org.apache.qpid.proton.engine.impl.ByteBufferUtils.newWriteableBuffer;
 
 public class ProxyImpl implements Proxy, TransportLayer {
@@ -46,28 +51,27 @@ public class ProxyImpl implements Proxy, TransportLayer {
 
     private boolean tailClosed = false;
     private boolean headClosed = false;
-    private boolean isProxyConfigured;
     private String host = "";
     private Map<String, String> headers = null;
     private TransportImpl underlyingTransport;
-    private ProxyState proxyState = ProxyState.PN_PROXY_NOT_STARTED;
     private ProxyHandler proxyHandler;
 
+    private volatile boolean isProxyConfigured;
+    private volatile ProxyState proxyState = ProxyState.PN_PROXY_NOT_STARTED;
+
     /**
-     * Create proxy transport layer - which, after configuring using
-     * the {@link #configure(String, Map, ProxyHandler, Transport)} API
-     * is ready for layering in qpid-proton-j transport layers, using
-     * {@link org.apache.qpid.proton.engine.impl.TransportInternal#addTransportLayer(TransportLayer)} API.
+     * Create proxy transport layer - which, after configuring using the {@link #configure(String, Map, ProxyHandler,
+     * Transport)} API is ready for layering in qpid-proton-j transport layers, using {@link
+     * org.apache.qpid.proton.engine.impl.TransportInternal#addTransportLayer(TransportLayer)} API.
      */
     public ProxyImpl() {
         this(null);
     }
 
     /**
-     * Create proxy transport layer - which, after configuring using
-     * the {@link #configure(String, Map, ProxyHandler, Transport)} API
-     * is ready for layering in qpid-proton-j transport layers, using
-     * {@link org.apache.qpid.proton.engine.impl.TransportInternal#addTransportLayer(TransportLayer)} API.
+     * Create proxy transport layer - which, after configuring using the {@link #configure(String, Map, ProxyHandler,
+     * Transport)} API is ready for layering in qpid-proton-j transport layers, using {@link
+     * org.apache.qpid.proton.engine.impl.TransportInternal#addTransportLayer(TransportLayer)} API.
      *
      * @param configuration Proxy configuration to use.
      */
@@ -104,7 +108,7 @@ public class ProxyImpl implements Proxy, TransportLayer {
         return this.outputBuffer;
     }
 
-    protected Boolean getIsProxyConfigured() {
+    protected boolean getIsProxyConfigured() {
         return this.isProxyConfigured;
     }
 
@@ -152,10 +156,17 @@ public class ProxyImpl implements Proxy, TransportLayer {
         private final TransportOutput underlyingOutput;
         private final ByteBuffer head;
 
+        // Represents a response from a CONNECT request.
+        private final AtomicReference<ProxyResponse> proxyAuthRequest = new AtomicReference<>();
+
+        /**
+         * Creates a transport wrapper that wraps the WebSocket transport input and output.
+         */
         ProxyTransportWrapper(TransportInput input, TransportOutput output) {
             underlyingInput = input;
             underlyingOutput = output;
             head = outputBuffer.asReadOnlyBuffer();
+            head.limit(0);
         }
 
         @Override
@@ -203,13 +214,18 @@ public class ProxyImpl implements Proxy, TransportLayer {
             switch (proxyState) {
                 case PN_PROXY_CONNECTING:
                     inputBuffer.flip();
-                    final ProxyHandler.ProxyResponseResult responseResult = proxyHandler.validateProxyResponse(inputBuffer);
-                    inputBuffer.compact();
-                    inputBuffer.clear();
+
+                    final ProxyResponse current = readProxyResponse(inputBuffer);
+                    if (current == null || current.isMissingContent()) {
+                        LOGGER.warn("Request is missing content. Waiting for more bytes.");
+                        break;
+                    }
+
+                    final ProxyResponseResult result = proxyHandler.validateProxyResponse(current);
 
                     // When connecting to proxy, it does not challenge us for authentication. If the user has specified
                     // a configuration and it is not NONE, then we fail due to misconfiguration.
-                    if (responseResult.getIsSuccess()) {
+                    if (result.isSuccess()) {
                         if (proxyConfiguration == null || proxyConfiguration.authentication() == ProxyAuthenticationType.NONE) {
                             proxyState = ProxyState.PN_PROXY_CONNECTED;
                         } else {
@@ -223,42 +239,49 @@ public class ProxyImpl implements Proxy, TransportLayer {
                         break;
                     }
 
-                    final String challenge = responseResult.getError();
-                    final Set<ProxyAuthenticationType> supportedTypes = getAuthenticationTypes(challenge);
+                    final Map<String, List<String>> headers = result.getResponse().getHeaders();
+                    final Set<ProxyAuthenticationType> supportedTypes = getAuthenticationTypes(headers);
 
                     // The proxy did not successfully connect, user has specified that they want a particular
                     // authentication method, but it is not in list of supported authentication methods.
                     if (proxyConfiguration != null && !supportedTypes.contains(proxyConfiguration.authentication())) {
-                        if (LOGGER.isErrorEnabled()) {
-                            LOGGER.error("Proxy authentication required. User configured: '{}', but supported proxy authentication methods are: {}",
-                                    proxyConfiguration.authentication(),
-                                    supportedTypes.stream().map(Enum::toString).collect(Collectors.joining(",")));
-                        }
+                        LOGGER.error(
+                                "Proxy authentication required. User configured: '{}', but supported proxy authentication methods are: {}",
+                                proxyConfiguration.authentication(),
+                                supportedTypes.stream().map(Enum::toString).collect(Collectors.joining(",")));
 
-                        closeTailProxyError(PROXY_CONNECT_USER_ERROR + PROXY_CONNECT_FAILED + challenge);
+                        closeTailProxyError(PROXY_CONNECT_USER_ERROR + PROXY_CONNECT_FAILED
+                                + result.getResponse().toString());
                         break;
                     }
 
+                    final List<String> challenges = headers.getOrDefault(PROXY_AUTHENTICATE, new ArrayList<>());
                     final ProxyChallengeProcessor processor = proxyConfiguration != null
-                            ? getChallengeProcessor(host, challenge, proxyConfiguration.authentication())
-                            : getChallengeProcessor(host, challenge, supportedTypes);
+                            ? getChallengeProcessor(host, challenges, proxyConfiguration.authentication())
+                            : getChallengeProcessor(host, challenges, supportedTypes);
 
                     if (processor != null) {
                         proxyState = ProxyState.PN_PROXY_CHALLENGE;
-                        headers = processor.getHeader();
+                        ProxyImpl.this.headers = processor.getHeader();
                     } else {
-                        closeTailProxyError(PROXY_CONNECT_FAILED + challenge);
+                        LOGGER.warn("Could not get ProxyChallengeProcessor for challenges.");
+                        closeTailProxyError(PROXY_CONNECT_FAILED + String.join(";", challenges));
                     }
                     break;
                 case PN_PROXY_CHALLENGE_RESPONDED:
                     inputBuffer.flip();
-                    final ProxyHandler.ProxyResponseResult result = proxyHandler.validateProxyResponse(inputBuffer);
-                    inputBuffer.compact();
+                    final ProxyResponse response = readProxyResponse(inputBuffer);
 
-                    if (result.getIsSuccess()) {
+                    if (response.isMissingContent()) {
+                        LOGGER.warn("Request is missing content. Waiting for more bytes.");
+                    }
+
+                    final ProxyResponseResult challengeResult = proxyHandler.validateProxyResponse(response);
+
+                    if (challengeResult.isSuccess()) {
                         proxyState = ProxyState.PN_PROXY_CONNECTED;
                     } else {
-                        closeTailProxyError(PROXY_CONNECT_FAILED + result.getError());
+                        closeTailProxyError(PROXY_CONNECT_FAILED + challengeResult.getResponse());
                     }
                     break;
                 default:
@@ -325,6 +348,11 @@ public class ProxyImpl implements Proxy, TransportLayer {
             }
         }
 
+        /**
+         * Gets the beginning of the output buffer.
+         *
+         * @return The beginning of the byte buffer.
+         */
         @Override
         public ByteBuffer head() {
             if (getIsHandshakeInProgress()) {
@@ -340,6 +368,11 @@ public class ProxyImpl implements Proxy, TransportLayer {
             }
         }
 
+        /**
+         * Removes the first number of bytes from the output buffer.
+         *
+         * @param bytes The number of bytes to remove from the output buffer.
+         */
         @Override
         public void pop(int bytes) {
             if (getIsHandshakeInProgress()) {
@@ -364,6 +397,9 @@ public class ProxyImpl implements Proxy, TransportLayer {
             }
         }
 
+        /**
+         * Closes the output transport.
+         */
         @Override
         public void close_head() {
             headClosed = true;
@@ -374,18 +410,21 @@ public class ProxyImpl implements Proxy, TransportLayer {
          * Gets the ProxyChallengeProcessor based on authentication types supported. Prefers DIGEST authentication if
          * supported over BASIC. Returns null if it cannot match any supported types.
          */
-        private ProxyChallengeProcessor getChallengeProcessor(String host, String challenge,
+        private ProxyChallengeProcessor getChallengeProcessor(String host, List<String> challenges,
                                                               Set<ProxyAuthenticationType> authentication) {
+            final ProxyAuthenticationType authType;
             if (authentication.contains(DIGEST)) {
-                return getChallengeProcessor(host, challenge, DIGEST);
+                authType = DIGEST;
             } else if (authentication.contains(BASIC)) {
-                return getChallengeProcessor(host, challenge, BASIC);
+                authType = BASIC;
             } else {
                 return null;
             }
+
+            return getChallengeProcessor(host, challenges, authType);
         }
 
-        private ProxyChallengeProcessor getChallengeProcessor(String host, String challenge,
+        private ProxyChallengeProcessor getChallengeProcessor(String host, List<String> challenges,
                                                               ProxyAuthenticationType authentication) {
             final ProxyAuthenticator authenticator = proxyConfiguration != null
                     ? new ProxyAuthenticator(proxyConfiguration)
@@ -393,47 +432,45 @@ public class ProxyImpl implements Proxy, TransportLayer {
 
             switch (authentication) {
                 case DIGEST:
-                    return new DigestProxyChallengeProcessorImpl(host, challenge, authenticator);
+                    final Optional<String> matching = challenges.stream()
+                            .filter(challenge -> challenge.toLowerCase(Locale.ROOT).startsWith(Constants.DIGEST_LOWERCASE))
+                            .findFirst();
+
+                    return matching.map(c -> new DigestProxyChallengeProcessorImpl(host, c, authenticator))
+                            .orElse(null);
                 case BASIC:
                     return new BasicProxyChallengeProcessorImpl(host, authenticator);
                 default:
+                    LOGGER.warn("Authentication type does not have a challenge processor: {}", authentication);
                     return null;
             }
         }
 
         /**
-         * Gets the supported authentication types based on the {@code error}.
+         * Gets the supported authentication types based on the {@code headers}.
          *
-         * @param error Response from service call.
-         * @return The supported proxy authentication methods. Or, an empty array if the value of {@code error} is
-         * {@code null}, an empty string. Also, if it does not contain {@link Constants#PROXY_AUTHENTICATE_HEADER} with
-         * {@link Constants#BASIC_LOWERCASE} or {@link Constants#DIGEST_LOWERCASE}.
+         * @param headers HTTP proxy response headers from service call.
+         * @return The supported proxy authentication methods. Or, an empty set if the value of {@code error} is {@code
+         *         null}, an empty string. Or, if it does not contain{@link Constants#PROXY_AUTHENTICATE_HEADER} with
+         *         {@link Constants#BASIC_LOWERCASE} or {@link Constants#DIGEST_LOWERCASE}.
          */
-        private Set<ProxyAuthenticationType> getAuthenticationTypes(String error) {
-            int index = error.indexOf(Constants.PROXY_AUTHENTICATE_HEADER);
-
-            if (index == -1) {
+        private Set<ProxyAuthenticationType> getAuthenticationTypes(Map<String, List<String>> headers) {
+            if (!headers.containsKey(PROXY_AUTHENTICATE)) {
                 return Collections.emptySet();
             }
 
-            Set<ProxyAuthenticationType> supportedTypes = new HashSet<>();
+            final Set<ProxyAuthenticationType> supportedTypes = new HashSet<>();
+            final List<String> authenticationTypes = headers.get(PROXY_AUTHENTICATE);
 
-            try (Scanner scanner = new Scanner(error)) {
-                while (scanner.hasNextLine()) {
-                    String line = scanner.nextLine().trim();
+            for (String type : authenticationTypes) {
+                final String lowercase = type.toLowerCase(Locale.ROOT);
 
-                    if (!line.startsWith(Constants.PROXY_AUTHENTICATE_HEADER)) {
-                        continue;
-                    }
-
-                    String substring = line.substring(Constants.PROXY_AUTHENTICATE_HEADER.length())
-                            .trim().toLowerCase(Locale.ROOT);
-
-                    if (substring.startsWith(Constants.BASIC_LOWERCASE)) {
-                        supportedTypes.add(BASIC);
-                    } else if (substring.startsWith(Constants.DIGEST_LOWERCASE)) {
-                        supportedTypes.add(DIGEST);
-                    }
+                if (lowercase.startsWith(Constants.BASIC_LOWERCASE)) {
+                    supportedTypes.add(BASIC);
+                } else if (lowercase.startsWith(Constants.DIGEST_LOWERCASE)) {
+                    supportedTypes.add(DIGEST);
+                } else {
+                    LOGGER.warn("Did not understand this authentication type: {}", type);
                 }
             }
 
@@ -443,6 +480,32 @@ public class ProxyImpl implements Proxy, TransportLayer {
         private void closeTailProxyError(String errorMessage) {
             tailClosed = true;
             underlyingTransport.closed(new TransportException(errorMessage));
+        }
+
+        /**
+         * Given a byte buffer, reads a HTTP proxy response from it.
+         *
+         * @param buffer The buffer to read HTTP proxy response from.
+         * @return The current HTTP proxy response. Or {@code null} if one could not be read from the buffer and there
+         *         is no current HTTP response.
+         */
+        private ProxyResponse readProxyResponse(ByteBuffer buffer) {
+            int size = buffer.remaining();
+            if (size <= 0) {
+                LOGGER.warn("InputBuffer is empty. Not reading any contents from it. Returning current response.");
+                return proxyAuthRequest.get();
+            }
+
+            ProxyResponse current = proxyAuthRequest.get();
+            if (current == null) {
+                proxyAuthRequest.set(ProxyResponseImpl.create(buffer));
+            } else {
+                current.addContent(buffer);
+            }
+
+            buffer.compact();
+
+            return proxyAuthRequest.get();
         }
     }
 }

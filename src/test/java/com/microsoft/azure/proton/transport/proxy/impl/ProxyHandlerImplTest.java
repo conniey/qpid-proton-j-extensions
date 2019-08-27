@@ -103,5 +103,4 @@ public class ProxyHandlerImplTest {
         Assert.assertEquals(emptyResponse, responseResult.getError());
         Assert.assertSame(buffer, response.getContents());
     }
-
 }

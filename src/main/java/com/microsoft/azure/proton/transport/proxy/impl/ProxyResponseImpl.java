@@ -47,9 +47,9 @@ public class ProxyResponseImpl implements ProxyResponse {
         int size = buffer.remaining();
 
         if (size <= 0) {
-            throw new IllegalArgumentException(String.format(Locale.ROOT,
-                    "Cannot create a buffer with no items in it. Limit: %s. Position: %s. Cap: %s",
-                    buffer.limit(), buffer.position(), buffer.capacity()));
+            LOGGER.warn("Cannot create a buffer with no items in it. Limit: {}. Position: {}. Cap: {}",
+                    buffer.limit(), buffer.position(), buffer.capacity());
+            return null;
         }
 
         final byte[] responseBytes = new byte[size];
